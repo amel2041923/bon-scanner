@@ -68,6 +68,11 @@ input[type=text],input[type=url],input[type=password],input[type=number],select{
 .msg{font-size:14px;padding:10px 12px;border-radius:10px;background:#161c22;border:1px solid var(--line)}
 .msg.ok{border-color:var(--ok)} .msg.bad{border-color:var(--bad)}
 kbd{font:12px var(--mono);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+#preview{position:fixed;inset:0;z-index:30;background:rgba(8,10,12,.94);display:grid;grid-template-rows:auto 1fr auto;gap:10px;
+  padding:calc(env(safe-area-inset-top,0px) + 12px) max(16px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 16px) max(16px,env(safe-area-inset-left,0px))}
+#preview img{max-width:100%;max-height:100%;object-fit:contain;margin:auto;display:block;background:#fff;border-radius:4px}
+#preview .meta{font:13px/1.4 var(--mono);color:var(--muted);word-break:break-all}
+#preview .acts{display:flex;gap:10px;justify-content:space-between}
 @media (prefers-reduced-motion:reduce){#flash{transition:none}}
 </style>
 </head>
@@ -82,6 +87,7 @@ kbd{font:12px var(--mono);border:1px solid var(--line);border-radius:4px;padding
 <header id="top" hidden>
   <div id="status">Bereit<small>Bon auf die dunkle Unterlage legen</small></div>
   <div class="chips">
+    <span class="chip" id="cBatch" title="In diesem Stapel">Stapel 0</span>
     <span class="chip" id="cToday" title="Heute aufgenommen">heute 0</span>
     <span class="chip" id="cQueue" title="Warten auf Upload">offen 0</span>
     <span class="chip ok" id="cDone" title="Hochgeladen">✓ 0</span>
@@ -102,6 +108,12 @@ kbd{font:12px var(--mono);border:1px solid var(--line);border-radius:4px;padding
     </div>
   </div>
 </footer>
+
+<div id="preview" hidden>
+  <div class="meta" id="pvMeta"></div>
+  <div style="min-height:0;display:flex"><img id="pvImg" alt="Vorschau des Belegs"></div>
+  <div class="acts"><button class="ghost" id="pvDel">Verwerfen</button><button class="primary" id="pvClose">Schließen</button></div>
+</div>
 
 <section class="sheet" id="setup">
   <div class="wrap">
@@ -124,6 +136,8 @@ kbd{font:12px var(--mono);border:1px solid var(--line);border-radius:4px;padding
       <select id="sMotion"><option value="1.6">hoch (wackelt nichts)</option><option value="2.6" selected>normal</option><option value="4">niedrig (Licht flackert)</option></select></label>
     <div class="row"><span>Mehrere Bons pro Bild einzeln speichern</span><input type="checkbox" id="sSplit" checked></div>
     <div class="row"><span>Bon automatisch ausschneiden und gerade drehen</span><input type="checkbox" id="sCrop" checked></div>
+    <label class="f"><span>Ausrichtung der ausgeschnittenen Belege</span>
+      <select id="sOrient"><option value="auto" selected>wie hingelegt (nur gerade richten)</option><option value="hoch">immer hochkant</option><option value="quer">immer quer</option></select></label>
     <div class="row"><span>Kontrast verstärken (blasses Thermopapier)</span><input type="checkbox" id="sEnh"></div>
     <div class="row"><span>Volle Foto-Auflösung nutzen (wenn das Handy es kann)</span><input type="checkbox" id="sPhoto" checked></div>
     <div class="row"><span>Ton und Vibration beim Auslösen</span><input type="checkbox" id="sBeep" checked></div>
@@ -147,7 +161,7 @@ const cfg = {
   url: LS.get('url', ''), key: LS.get('key', ''), batch: LS.get('batch', ''),
   still: LS.get('still', 800), motion: LS.get('motion', 2.6),
   split: LS.get('split', true), crop: LS.get('crop', true), enh: LS.get('enh', false),
-  photo: LS.get('photo', true), beep: LS.get('beep', true)
+  photo: LS.get('photo', true), beep: LS.get('beep', true), orient: LS.get('orient', 'auto')
 };
 // Einrichtung per Link: …/#setup=<base64 von {"url":"…","key":"…"}> – wird gespeichert und aus der Adresse entfernt.
 (function readSetupHash() {
@@ -164,14 +178,14 @@ function fillForm() {
   $('sUrl').value = cfg.url; $('sKey').value = cfg.key; $('sBatch').value = cfg.batch;
   $('sStill').value = String(cfg.still); $('sMotion').value = String(cfg.motion);
   $('sSplit').checked = cfg.split; $('sCrop').checked = cfg.crop; $('sEnh').checked = cfg.enh;
-  $('sPhoto').checked = cfg.photo; $('sBeep').checked = cfg.beep;
+  $('sPhoto').checked = cfg.photo; $('sBeep').checked = cfg.beep; $('sOrient').value = cfg.orient;
 }
 function readForm() {
   cfg.url = $('sUrl').value.trim(); cfg.key = $('sKey').value.trim();
   cfg.batch = $('sBatch').value.trim().replace(/[^A-Za-z0-9 ._-]/g, '_').slice(0, 40);
   cfg.still = +$('sStill').value; cfg.motion = +$('sMotion').value;
   cfg.split = $('sSplit').checked; cfg.crop = $('sCrop').checked; cfg.enh = $('sEnh').checked;
-  cfg.photo = $('sPhoto').checked; cfg.beep = $('sBeep').checked;
+  cfg.photo = $('sPhoto').checked; cfg.beep = $('sBeep').checked; cfg.orient = $('sOrient').value;
   for (const k of Object.keys(cfg)) LS.set(k, cfg[k]);
 }
 fillForm();
@@ -315,10 +329,13 @@ function frameDiff(a, b) { if (!a || a.length !== b.length) return 999; let d = 
 
 /* ---------- Zuschneiden ---------- */
 function cropBon(src, sw, sh, r, scale) {
-  // Längsseite senkrecht stellen, kleinste Drehung wählen
-  let rot = Math.PI / 2 - r.th; if (rot > Math.PI / 2) rot -= Math.PI; if (rot < -Math.PI / 2) rot += Math.PI;
+  // Ausrichtung: hoch = Längsseite senkrecht, quer = waagerecht, auto = kleinste Drehung (wie hingelegt)
+  const norm = a => { while (a > Math.PI / 2) a -= Math.PI; while (a <= -Math.PI / 2) a += Math.PI; return a; };
+  const rHoch = norm(Math.PI / 2 - r.th), rQuer = norm(-r.th);
+  const quer = cfg.orient === 'quer' || (cfg.orient === 'auto' && Math.abs(rQuer) < Math.abs(rHoch));
+  const rot = quer ? rQuer : rHoch;
   const m = 0.025 * r.len;
-  let W = (r.wid + 2 * m) * scale, H = (r.len + 2 * m) * scale;
+  let W = ((quer ? r.len : r.wid) + 2 * m) * scale, H = ((quer ? r.wid : r.len) + 2 * m) * scale;
   const k = Math.min(1, 3200 / Math.max(W, H));
   W = Math.round(W * k); H = Math.round(H * k);
   const c = document.createElement('canvas'); c.width = W; c.height = H;
@@ -409,7 +426,7 @@ function setStatus(main, sub, cls) {
 function setRing(f) { $('ring').setAttribute('stroke-dashoffset', String(207.3 * (1 - Math.max(0, Math.min(1, f))))); }
 
 function tick() {
-  if (!stream || video.readyState < 2 || !$('setup').hidden || document.hidden) return;
+  if (!stream || video.readyState < 2 || !$('setup').hidden || !$('preview').hidden || document.hidden) return;
   const vw = video.videoWidth, vh = video.videoHeight;
   const cur = toGray(video, vw, vh, AW);
   const bons = findBons(cur);
@@ -495,10 +512,10 @@ async function capture(manual, sig) {
     for (let i = 0; i < canvases.length; i++) {
       let c = canvases[i]; if (cfg.enh) c = enhance(c);
       const name = nextName(canvases.length > 1 ? String.fromCharCode(97 + i) : tag);
-      const blob = await toBlob(c), th = thumb(c); c.width = 0; c.height = 0;
+      const blob = await toBlob(c), th = thumb(c); storePreview(name, c); c.width = 0; c.height = 0;
       ids.push(name);
       await enqueue({ id: name, name, sub: cfg.batch, blob, thumb: th, status: 'offen', tries: 0, t: Date.now() });
-      bumpToday();
+      bumpToday(); bumpBatch();
     }
     lastCapIds = ids;
     lastSig = sig || signature(toGray(video, video.videoWidth, video.videoHeight, AW));
@@ -567,14 +584,42 @@ async function updateChips(err) {
   if (err) lastErr = err;
   const list = await pending(); const n = list.length; const nErr = list.filter(x => x.tries).length;
   $('cToday').textContent = 'heute ' + todayN();
+  $('cBatch').textContent = (cfg.batch || 'Stapel') + ' ' + LS.get(batchKey(), 0);
   const q = $('cQueue'); q.textContent = (nErr ? `Fehler ${nErr} · ` : '') + 'offen ' + n;
   q.className = 'chip' + (nErr ? ' bad' : n > 20 ? ' warn' : '');
   q.title = nErr ? 'Letzter Fehler: ' + lastErr : 'Warten auf Upload';
   $('cDone').textContent = '✓ ' + doneCount;
   if (!cfg.url || !cfg.key) { q.className = 'chip warn'; q.title = 'Keine Drive-Verbindung eingerichtet – Bilder bleiben auf dem Handy'; }
 }
+const previews = new Map();
+function storePreview(id, c) {
+  const t = document.createElement('canvas'), k = Math.min(1, 1100 / Math.max(c.width, c.height));
+  t.width = Math.round(c.width * k); t.height = Math.round(c.height * k);
+  t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
+  previews.set(id, t.toDataURL('image/jpeg', 0.8));
+  while (previews.size > 12) previews.delete(previews.keys().next().value);
+}
+function batchKey() { return 'batch.' + (cfg.batch || '-'); }
+function bumpBatch(d = 1) { LS.set(batchKey(), Math.max(0, LS.get(batchKey(), 0) + d)); }
+let pvId = null;
+function openPreview(id) {
+  pvId = id; const im = $('thumbs').querySelector(`img[data-id="${CSS.escape(id)}"]`);
+  $('pvImg').src = previews.get(id) || (im && im.src) || '';
+  const st = im && im.classList.contains('up') ? 'in Drive' : (im && im.classList.contains('err') ? 'Upload-Fehler, wird wiederholt' : 'wartet auf Upload');
+  $('pvMeta').textContent = id + ' · ' + st + (previews.has(id) ? '' : ' · nur kleine Vorschau');
+  $('pvDel').hidden = !!(im && im.classList.contains('up'));
+  $('preview').hidden = false;
+}
+$('pvClose').onclick = () => { $('preview').hidden = true; };
+$('pvDel').onclick = async () => {
+  if (!pvId || pvId === inFlightId) { setStatus('Wird gerade hochgeladen', 'Kurz warten, dann in Drive löschen', 'warn'); return; }
+  discarded.add(pvId); await removeItem(pvId);
+  const im = $('thumbs').querySelector(`img[data-id="${CSS.escape(pvId)}"]`); if (im) im.remove();
+  lastCapIds = lastCapIds.filter(x => x !== pvId); LS.set('dayN', Math.max(0, todayN() - 1)); bumpBatch(-1);
+  $('preview').hidden = true; updateChips(); setStatus('Verworfen', pvId);
+};
 function addThumb(id, src) {
-  const im = new Image(); im.src = src; im.dataset.id = id; im.alt = id;
+  const im = new Image(); im.src = src; im.dataset.id = id; im.alt = id; im.onclick = () => openPreview(id);
   $('thumbs').prepend(im); while ($('thumbs').children.length > 30) $('thumbs').lastChild.remove();
 }
 function markThumb(id, cls) { const im = $('thumbs').querySelector(`img[data-id="${CSS.escape(id)}"]`); if (im) { im.classList.remove('up', 'err'); im.classList.add(cls); } }
@@ -596,12 +641,12 @@ $('bUndo').onclick = async () => {
     if (id !== inFlightId) { await removeItem(id); }
     const im = imgOf(id); if (im) im.remove(); n++;
   }
-  LS.set('dayN', Math.max(0, todayN() - n)); lastCapIds = []; state = 'idle'; lastSig = null; updateChips();
+  LS.set('dayN', Math.max(0, todayN() - n)); bumpBatch(-n); lastCapIds = []; state = 'idle'; lastSig = null; updateChips();
   if (up.length || busyNow.length) setStatus('Teilweise schon in Drive', 'Bitte dort löschen: ' + up.concat(busyNow).join(', '), 'warn');
   else setStatus('Verworfen', n + ' Bild' + (n === 1 ? '' : 'er'));
 };
 document.addEventListener('keydown', e => {
-  if (!$('setup').hidden || e.repeat) return;
+  if (!$('setup').hidden || !$('preview').hidden || e.repeat) return;
   if ([' ', 'Enter', 'PageDown', 'ArrowRight', 'ArrowDown', 'AudioVolumeUp', 'AudioVolumeDown', 'MediaPlayPause'].includes(e.key)) { e.preventDefault(); capture(true); }
   else if (e.key === 'p' || e.key === 'P') $('bAuto').click();
 });
